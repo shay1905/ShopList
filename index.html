@@ -576,6 +576,7 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
 'use strict';
 
@@ -731,25 +732,177 @@ Lube | Intimate Care |
 Condoms | Intimate Care |`;
 
 // ══════════════════════════════════════════
-//  DB (localStorage)
+//  SUPABASE CONFIG  ← fill in your values
 // ══════════════════════════════════════════
 
-const DB = {
-  get(k)    { try { return JSON.parse(localStorage.getItem('groc_'+k)); } catch { return null; } },
-  set(k, v) { localStorage.setItem('groc_'+k, JSON.stringify(v)); }
+const SUPABASE_URL  = 'https://jedmpdmaezlmepcsizvy.supabase.co';
+const SUPABASE_ANON = 'sb_publishable_DoJ30Y9_84-f1NvEL8VQzQ_7zuJ78g6';
+
+// ══════════════════════════════════════════
+//  DB (Supabase + in-memory cache)
+// ══════════════════════════════════════════
+// Real schema (verified):
+//   template_items     : id(uuid), name, category, note, created_at(auto)
+//   shopping_lists     : id(uuid), status, total_amount, created_at(auto), updated_at(auto), completed_at
+//   shopping_list_items: id(uuid), list_id(uuid), template_item_id(uuid), name, category,
+//                        note, quantity, is_checked, created_at(auto)
+//   shopping_history   : id(uuid), list_id(uuid), total_amount, items_snapshot(jsonb), completed_at
+
+const sb  = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+const MEM = { tmpl: [], lists: [], items: [], history: [] };
+
+// All id columns are uuid — use crypto.randomUUID()
+const uid = () => crypto.randomUUID();
+
+// Timestamp helpers
+const toIso   = ts => ts ? new Date(ts).toISOString() : null;
+const fromIso = ts => ts ? new Date(ts).getTime()    : null;
+
+// Column mappers (camelCase JS ↔ snake_case DB)
+const toDb = {
+  // created_at / updated_at omitted — DB manages them with DEFAULT now()
+  list: l => ({
+    id:           l.id,
+    status:       l.status,
+    total_amount: l.totalAmount ?? null,
+    completed_at: toIso(l.completedAt),
+  }),
+  item: i => ({
+    id:               i.id,
+    list_id:          i.shoppingListId,           // FK column is list_id
+    template_item_id: i.templateItemId ?? null,
+    name:             i.nameSnapshot,             // column is name, not name_snapshot
+    category:         i.categorySnapshot ?? null,
+    note:             i.noteSnapshot     ?? null,
+    quantity:         i.quantity,
+    is_checked:       i.isChecked,
+  }),
+  hist: h => ({
+    id:              h.id,
+    list_id:         h.listId ?? null,            // FK back to the completed list
+    total_amount:    h.totalAmount ?? null,
+    items_snapshot:  h.items,                     // column is items_snapshot, not items
+    completed_at:    toIso(h.completedAt),
+  }),
+};
+const fromDb = {
+  list: r => ({
+    id:          r.id,
+    status:      r.status,
+    totalAmount: r.total_amount,
+    createdAt:   fromIso(r.created_at),
+    completedAt: fromIso(r.completed_at),
+  }),
+  item: r => ({
+    id:               r.id,
+    shoppingListId:   r.list_id,                  // list_id → shoppingListId
+    templateItemId:   r.template_item_id,
+    nameSnapshot:     r.name,                     // name → nameSnapshot
+    categorySnapshot: r.category ?? '',
+    noteSnapshot:     r.note     ?? '',
+    quantity:         r.quantity,
+    isChecked:        r.is_checked,
+  }),
+  hist: r => ({
+    id:          r.id,
+    listId:      r.list_id,
+    totalAmount: r.total_amount,
+    items:       r.items_snapshot,                // items_snapshot → items
+    completedAt: fromIso(r.completed_at),
+  }),
 };
 
-const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+// Returns [deleted, upserted] by comparing old vs new arrays
+function diffArrays(oldArr, newArr) {
+  const oldMap = new Map(oldArr.map(x => [x.id, x]));
+  const newIds = new Set(newArr.map(x => x.id));
+  const deleted  = oldArr.filter(x => !newIds.has(x.id));
+  const upserted = newArr.filter(x => {
+    const o = oldMap.get(x.id);
+    return !o || JSON.stringify(o) !== JSON.stringify(x);
+  });
+  return [deleted, upserted];
+}
 
-// Simple accessors
-const getTmpl    = ()  => DB.get('tmpl')    || [];
-const setTmpl    = v   => DB.set('tmpl', v);
-const getLists   = ()  => DB.get('lists')   || [];
-const setLists   = v   => DB.set('lists', v);
-const getItems   = ()  => DB.get('items')   || [];
-const setItems   = v   => DB.set('items', v);
-const getHistory = ()  => DB.get('history') || [];
-const setHistory = v   => DB.set('history', v);
+// Synchronous getters — shallow-copy each item so in-place mutations
+// don't pollute MEM until the matching setXxx() is called
+const getTmpl    = () => MEM.tmpl.map(x => ({...x}));
+const getLists   = () => MEM.lists.map(x => ({...x}));
+const getItems   = () => MEM.items.map(x => ({...x}));
+const getHistory = () => MEM.history.map(x => ({...x}));
+
+// Setters: update MEM immediately, sync to Supabase in background
+function setTmpl(v) {
+  const [del, ups] = diffArrays(MEM.tmpl, v); MEM.tmpl = v;
+  if (del.length) sb.from('template_items').delete().in('id', del.map(x => x.id))
+    .then(({ error }) => { if (error) console.error('setTmpl delete:', error); });
+  if (ups.length) sb.from('template_items').upsert(ups)
+    .then(({ error }) => { if (error) console.error('setTmpl upsert:', error); });
+}
+// Returns a Promise that REJECTS on Supabase error.
+// Callers that write child rows (shopping_list_items) must await this
+// so the parent row is confirmed in the DB before the FK-constrained write.
+function setLists(v) {
+  const [del, ups] = diffArrays(MEM.lists, v); MEM.lists = v;
+  const ops = [];
+  if (del.length) ops.push(
+    sb.from('shopping_lists').delete().in('id', del.map(x => x.id))
+      .then(({ error }) => {
+        if (error) { console.error('setLists delete — fn:setLists, error:', error); throw error; }
+      })
+  );
+  if (ups.length) {
+    const payload = ups.map(toDb.list);
+    ops.push(
+      sb.from('shopping_lists').upsert(payload, { onConflict: 'id' })
+        .then(({ error }) => {
+          if (error) { console.error('setLists upsert — fn:setLists, payload:', payload, ', error:', error); throw error; }
+        })
+    );
+  }
+  return Promise.all(ops);
+}
+function setItems(v) {
+  const [del, ups] = diffArrays(MEM.items, v); MEM.items = v;
+  if (del.length) sb.from('shopping_list_items').delete().in('id', del.map(x => x.id))
+    .then(({ error }) => { if (error) console.error('setItems delete:', error); });
+  if (ups.length) {
+    const payload = ups.map(toDb.item);
+    const listIds = [...new Set(payload.map(x => x.list_id))];
+    sb.from('shopping_list_items').upsert(payload, { onConflict: 'id' })
+      .then(({ error }) => {
+        if (error) console.error('setItems upsert — error:', error, '— parent list_ids:', listIds, '— payload:', payload);
+      });
+  }
+}
+function setHistory(v) {
+  const oldIds = new Set(MEM.history.map(x => x.id));
+  const added  = v.filter(x => !oldIds.has(x.id));
+  MEM.history = v;
+  if (added.length) sb.from('shopping_history').insert(added.map(toDb.hist))
+    .then(({ error }) => { if (error) console.error('setHistory insert:', error); });
+}
+
+// Load all tables from Supabase into MEM
+// Note: sorting done client-side to avoid .order() quoting issues
+async function loadFromSupabase() {
+  const [tRes, lRes, iRes, hRes] = await Promise.all([
+    sb.from('template_items').select('*'),
+    sb.from('shopping_lists').select('*'),
+    sb.from('shopping_list_items').select('*'),
+    sb.from('shopping_history').select('*'),
+  ]);
+  if (tRes.error)  console.error('load template_items:', tRes.error);
+  if (lRes.error)  console.error('load shopping_lists:', lRes.error);
+  if (iRes.error)  console.error('load shopping_list_items:', iRes.error);
+  if (hRes.error)  console.error('load shopping_history:', hRes.error);
+  MEM.tmpl    = tRes.data || [];
+  MEM.lists   = (lRes.data || []).map(fromDb.list)
+                  .sort((a, b) => a.createdAt - b.createdAt);
+  MEM.items   = (iRes.data || []).map(fromDb.item);
+  MEM.history = (hRes.data || []).map(fromDb.hist)
+                  .sort((a, b) => b.completedAt - a.completedAt);
+}
 
 const draftList  = ()  => getLists().find(l => l.status === 'draft');
 const activeList = ()  => getLists().find(l => l.status === 'active');
@@ -761,8 +914,10 @@ const listItems  = id  => getItems().filter(i => i.shoppingListId === id);
 //  INIT
 // ══════════════════════════════════════════
 
-function init() {
-  if (!DB.get('ready')) {
+async function init() {
+  await loadFromSupabase();
+  if (!MEM.tmpl.length) {
+    // First run: seed template and create initial draft list
     const tmpl = [];
     TEMPLATE_RAW.split('\n').forEach(line => {
       line = line.trim();
@@ -771,18 +926,16 @@ function init() {
       if (p[0]) tmpl.push({ id: uid(), name: p[0], category: p[1]||'', note: p[2]||'' });
     });
     setTmpl(tmpl);
-    setLists([{ id: uid(), status: 'draft', totalAmount: null, createdAt: Date.now() }]);
-    setItems([]);
-    DB.set('ready', true);
+    await setLists([{ id: uid(), status: 'draft', totalAmount: null, createdAt: Date.now() }]);
   }
-  ensureDraft();
+  await ensureDraft(); // guarantee draft row is committed before renderList() is called
 }
 
-function ensureDraft() {
+async function ensureDraft() {
   if (!draftList()) {
     const lists = getLists();
     lists.push({ id: uid(), status: 'draft', totalAmount: null, createdAt: Date.now() });
-    setLists(lists);
+    await setLists(lists);
   }
 }
 
@@ -869,7 +1022,7 @@ function buildActive(list) {
   const checked = all.filter(i => i.isChecked).length;
   const total   = all.length;
   const pct     = total ? Math.round(checked/total*100) : 0;
-  const focus   = DB.get('focusMode') !== false;
+  const focus   = localStorage.getItem('groc_focusMode') !== 'false';
   const shown   = focus ? all.filter(i => !i.isChecked) : all;
 
   let h = `
@@ -1129,7 +1282,7 @@ function toggleCheck(id) {
 }
 
 function toggleFocus() {
-  DB.set('focusMode', DB.get('focusMode') === false);
+  localStorage.setItem('groc_focusMode', localStorage.getItem('groc_focusMode') === 'false' ? 'true' : 'false');
   rerender();
 }
 
@@ -1177,7 +1330,7 @@ function doFinish(carry) {
   completeList(al, _pendingAmt, remaining);
 }
 
-function completeList(list, amount, remaining) {
+async function completeList(list, amount, remaining) {
   const completedAt = Date.now();
 
   // Snapshot items into history archive before anything else changes
@@ -1189,7 +1342,7 @@ function completeList(list, amount, remaining) {
     isChecked: i.isChecked,
   }));
   const history = getHistory();
-  history.unshift({ id: list.id, completedAt, totalAmount: amount, items: snapshot });
+  history.unshift({ id: uid(), listId: list.id, completedAt, totalAmount: amount, items: snapshot });
   setHistory(history);
 
   const lists = getLists();
@@ -1198,7 +1351,11 @@ function completeList(list, amount, remaining) {
 
   const newDraft = { id: uid(), status: 'draft', totalAmount: null, createdAt: Date.now() };
   lists.push(newDraft);
-  setLists(lists);
+
+  // MEM is updated synchronously by setLists, so toast + rerender reflect
+  // the new state immediately. We still await the DB write before writing
+  // carried-over items — they have a FK on newDraft.id in shopping_lists.
+  await setLists(lists);
 
   if (remaining.length) {
     const items = getItems();
@@ -1210,7 +1367,7 @@ function completeList(list, amount, remaining) {
         noteSnapshot: [r.noteSnapshot, 'from previous'].filter(Boolean).join(' · '),
         quantity: r.quantity, isChecked: false });
     });
-    setItems(items);
+    setItems(items); // safe: newDraft row is now committed in shopping_lists
   }
 
   toast('Shopping completed! 🎉');
@@ -1618,8 +1775,17 @@ function toast(msg) {
 //  BOOT
 // ══════════════════════════════════════════
 
-init();
-renderList();
+(async () => {
+  document.getElementById('s-list').innerHTML = '<div class="empty"><p>Loading…</p></div>';
+  try {
+    await init();
+    renderList();
+  } catch (e) {
+    console.error('init failed:', e);
+    document.getElementById('s-list').innerHTML =
+      '<div class="empty"><p>Failed to connect. Check console and reload.</p></div>';
+  }
+})();
 </script>
 </body>
 </html>
