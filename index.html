@@ -368,6 +368,25 @@
     /* ── Added badge ── */
     .added-badge { font-size: 11px; color: var(--primary-dark); background: var(--primary-light); border-radius: 10px; padding: 3px 9px; font-weight: 700; flex-shrink: 0; }
 
+    /* ── Quick-add qty stepper (draft add-row) ── */
+    .add-stepper { display:flex; align-items:center; gap:4px; flex-shrink:0; }
+    .add-stepper .step-btn { width:34px; height:46px; border-radius:var(--radius-sm); font-size:20px; }
+    .add-stepper .step-val { font-size:15px; font-weight:700; min-width:20px; text-align:center; }
+
+    /* ── Quick Check selection ── */
+    .list-item.qa-sel { background: var(--primary-light); }
+    .qa-confirm-bar { position:sticky; bottom:84px; padding:12px 16px;
+      background:var(--surface); border-top:1px solid var(--border); z-index:100; }
+    .qa-item-stepper { display:flex; align-items:center; gap:0; flex-shrink:0; }
+    .qa-item-stepper button { width:32px; height:32px; border-radius:8px; border:1.5px solid var(--primary);
+      background:var(--surface); color:var(--primary-dark); font-size:19px; font-weight:700;
+      display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; }
+    .qa-item-stepper button:active { background:var(--primary-light); }
+    .qa-item-stepper .qi-val { font-size:15px; font-weight:700; min-width:28px; text-align:center; color:var(--text); }
+
+    /* ── History select mode ── */
+    .hist-entry.hist-sel { background: var(--primary-light); }
+
     /* ── Action section ── */
     .action-pad { padding: 16px; }
 
@@ -1002,8 +1021,11 @@ function buildDraft(list) {
           oninput="onAddInput(this.value)">
         <div class="ac-list" id="ac-list" style="display:none"></div>
       </div>
-      <input type="number" class="input input-qty" id="add-qty"
-        value="1" min="1" max="99" inputmode="numeric">
+      <div class="add-stepper">
+        <button class="step-btn" onclick="stepAddQty(-1)">−</button>
+        <span class="step-val" id="add-qty-val">${_addQty}</span>
+        <button class="step-btn" onclick="stepAddQty(1)">+</button>
+      </div>
       <button class="btn-icon" onclick="onAddBtn()">+</button>
     </div>`;
 
@@ -1101,7 +1123,7 @@ function itemRow(item, mode) {
 }
 
 // ── Add input wiring ─────────────────────
-let _addQ = '', _addOpenOnce = false;
+let _addQ = '', _addOpenOnce = false, _addQty = 1;
 
 function wireAddInput() {
   const inp = document.getElementById('add-inp');
@@ -1158,27 +1180,33 @@ function hideAC() {
 function selectAC(tid) {
   const t = getTmpl().find(x => x.id === tid);
   if (!t) return;
-  const qty = parseInt(document.getElementById('add-qty')?.value) || 1;
-  addToList(t.name, t.category, t.note, t.id, qty);
-  resetAddInput();
+  const inp = document.getElementById('add-inp');
+  if (inp) { inp.value = t.name; _addQ = t.name; inp.focus(); }
+  hideAC();
+}
+
+function stepAddQty(d) {
+  _addQty = Math.max(1, _addQty + d);
+  const el = document.getElementById('add-qty-val');
+  if (el) el.textContent = _addQty;
 }
 
 function onAddBtn() {
   const inp = document.getElementById('add-inp');
   if (!inp || !inp.value.trim()) return;
   const q   = inp.value.trim();
-  const qty = parseInt(document.getElementById('add-qty')?.value) || 1;
+  const qty = _addQty;
   const t   = getTmpl().find(x => x.name.toLowerCase() === q.toLowerCase());
   if (t) { addToList(t.name, t.category, t.note, t.id, qty); resetAddInput(); }
   else   { _pendingNew = { name: q, qty }; proposeNew(); }
 }
 
 function resetAddInput() {
-  _addQ = '';
+  _addQ = ''; _addQty = 1;
   const inp = document.getElementById('add-inp');
-  const qty = document.getElementById('add-qty');
   if (inp) { inp.value = ''; inp.focus(); }
-  if (qty) qty.value = 1;
+  const qel = document.getElementById('add-qty-val');
+  if (qel) qel.textContent = 1;
   hideAC();
 }
 
@@ -1188,7 +1216,7 @@ let _pendingNew = null;
 function proposeNew() {
   const inp = document.getElementById('add-inp');
   const q   = (inp && inp.value.trim()) || (_pendingNew && _pendingNew.name) || '';
-  const qty = parseInt(document.getElementById('add-qty')?.value) || 1;
+  const qty = _addQty;
   _pendingNew = { name: q, qty };
   document.getElementById('m-newitem-title').textContent = `"${q}"`;
   document.getElementById('m-newitem-msg').textContent   = 'This item is not in your template. What would you like to do?';
@@ -1378,7 +1406,8 @@ async function completeList(list, amount, remaining) {
 //  QUICK ADD SCREEN
 // ══════════════════════════════════════════
 
-let _checkQ = '', _checkQty = 1;
+let _checkQ = '';
+let _qaSelected = new Map(); // tid → quantity
 
 function renderCheck() {
   const el   = document.getElementById('s-check');
@@ -1409,16 +1438,34 @@ function renderCheck() {
         placeholder="Search items…" value="${esc(_checkQ)}"
         oninput="onCheckQ(this.value)"
         autocorrect="off" spellcheck="false">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding:0 2px">
-        <span style="font-size:13px;color:var(--text-light);font-weight:600">Quantity per item</span>
-        <div class="stepper" style="gap:8px">
-          <button class="step-btn" style="width:34px;height:34px;font-size:20px" onclick="qaStepQty(-1)">−</button>
-          <span class="step-val" style="font-size:17px;min-width:28px" id="qa-qty-val">${_checkQty}</span>
-          <button class="step-btn" style="width:34px;height:34px;font-size:20px" onclick="qaStepQty(1)">+</button>
-        </div>
-      </div>
     </div>
     <div class="card">`;
+
+  const qaRow = (t) => {
+    const inl = inList.has(t.name.toLowerCase());
+    const sel = !inl && _qaSelected.has(t.id);
+    const qty = sel ? _qaSelected.get(t.id) : 1;
+    let cls = 'list-item';
+    if (inl) cls += ' disabled';
+    else if (sel) cls += ' qa-sel';
+    const onclick = inl ? '' : `onclick="qaToggleSelect('${t.id}')"`;
+    let right;
+    if (inl) {
+      right = `<span class="added-badge">Added</span>`;
+    } else if (sel) {
+      right = `<div class="qa-item-stepper">`
+        + `<button onclick="event.stopPropagation();qaStepItemQty('${t.id}',-1)">−</button>`
+        + `<span class="qi-val" id="qi-${t.id}">${qty}</span>`
+        + `<button onclick="event.stopPropagation();qaStepItemQty('${t.id}',1)">+</button>`
+        + `</div>`;
+    } else {
+      right = `<span style="font-size:26px;color:var(--primary);line-height:1">+</span>`;
+    }
+    return `<div class="${cls}" data-tid="${t.id}" ${onclick}>`
+      + `<div class="item-body"><div class="item-name">${q?hlMatch(t.name,_checkQ):esc(t.name)}</div>`
+      + (t.note ? `<div class="item-note">${esc(t.note)}</div>` : '')
+      + `</div><span class="qa-badge">${right}</span></div>`;
+  };
 
   let any = false, first = true;
   CATEGORIES.forEach(cat => {
@@ -1426,32 +1473,23 @@ function renderCheck() {
     any = true;
     h += `<div class="cat-header${first?' style="border-top:none"':''}">${esc(cat)}</div>`;
     first = false;
-    ci.forEach(t => {
-      const inl = inList.has(t.name.toLowerCase());
-      h += `<div class="list-item${inl?' disabled':''}" ${!inl?`onclick="qaAdd('${t.id}')"`:''}>`
-         + `<div class="item-body"><div class="item-name">${q?hlMatch(t.name,_checkQ):esc(t.name)}</div>`
-         + (t.note ? `<div class="item-note">${esc(t.note)}</div>` : '')
-         + `</div>`
-         + (inl ? `<span class="added-badge">Added</span>` : `<span style="font-size:26px;color:var(--primary);line-height:1">+</span>`)
-         + `</div>`;
-    });
+    ci.forEach(t => { h += qaRow(t); });
   });
   if (other.length) {
     any = true;
     h += `<div class="cat-header">Other</div>`;
-    other.forEach(t => {
-      const inl = inList.has(t.name.toLowerCase());
-      h += `<div class="list-item${inl?' disabled':''}" ${!inl?`onclick="qaAdd('${t.id}')"`:''}>`
-         + `<div class="item-body"><div class="item-name">${q?hlMatch(t.name,_checkQ):esc(t.name)}</div>`
-         + (t.note ? `<div class="item-note">${esc(t.note)}</div>` : '')
-         + `</div>`
-         + (inl ? `<span class="added-badge">Added</span>` : `<span style="font-size:26px;color:var(--primary);line-height:1">+</span>`)
-         + `</div>`;
-    });
+    other.forEach(t => { h += qaRow(t); });
   }
   h += '</div>';
   if (!any) h = h.replace('<div class="card"></div>', '')
     + `<div class="empty"><p>No items found for "<strong>${esc(_checkQ)}</strong>"</p></div>`;
+
+  if (_qaSelected.size > 0) {
+    const n = _qaSelected.size;
+    h += `<div class="qa-confirm-bar" id="qa-confirm-bar">
+      <button class="btn btn-primary" onclick="qaAddSelected()">Add ${n} item${n>1?'s':''} to list</button>
+    </div>`;
+  }
 
   el.innerHTML = h;
 }
@@ -1463,25 +1501,76 @@ function onCheckQ(v) {
   if (inp) { inp.focus(); inp.setSelectionRange(v.length, v.length); }
 }
 
-function qaStepQty(d) {
-  _checkQty = Math.max(1, _checkQty + d);
-  const el = document.getElementById('qa-qty-val');
-  if (el) el.textContent = _checkQty;
+function qaToggleSelect(tid) {
+  if (_qaSelected.has(tid)) _qaSelected.delete(tid);
+  else _qaSelected.set(tid, 1);
+
+  const sel = _qaSelected.has(tid);
+  const qty = sel ? _qaSelected.get(tid) : 1;
+
+  // Update the tapped row in-place — no scroll reset
+  const row = document.querySelector(`.list-item[data-tid="${tid}"]`);
+  if (row) {
+    row.classList.toggle('qa-sel', sel);
+    const badge = row.querySelector('.qa-badge');
+    if (badge) {
+      if (sel) {
+        badge.innerHTML = `<div class="qa-item-stepper">`
+          + `<button onclick="event.stopPropagation();qaStepItemQty('${tid}',-1)">−</button>`
+          + `<span class="qi-val" id="qi-${tid}">${qty}</span>`
+          + `<button onclick="event.stopPropagation();qaStepItemQty('${tid}',1)">+</button>`
+          + `</div>`;
+      } else {
+        badge.innerHTML = `<span style="font-size:26px;color:var(--primary);line-height:1">+</span>`;
+      }
+    }
+  }
+
+  // Update / create / remove confirm bar without touching scroll
+  const screen = document.getElementById('s-check');
+  let bar = document.getElementById('qa-confirm-bar');
+  const n = _qaSelected.size;
+  if (n > 0) {
+    const label = `Add ${n} item${n > 1 ? 's' : ''} to list`;
+    if (bar) {
+      bar.querySelector('button').textContent = label;
+    } else {
+      bar = document.createElement('div');
+      bar.id = 'qa-confirm-bar';
+      bar.className = 'qa-confirm-bar';
+      bar.innerHTML = `<button class="btn btn-primary" onclick="qaAddSelected()">${label}</button>`;
+      screen.appendChild(bar);
+    }
+  } else if (bar) {
+    bar.remove();
+  }
 }
 
-function qaAdd(tid) {
-  const t    = getTmpl().find(x => x.id === tid); if (!t) return;
+function qaStepItemQty(tid, d) {
+  if (!_qaSelected.has(tid)) return;
+  const newQty = Math.max(1, _qaSelected.get(tid) + d);
+  _qaSelected.set(tid, newQty);
+  const el = document.getElementById(`qi-${tid}`);
+  if (el) el.textContent = newQty;
+}
+
+function qaAddSelected() {
   const list = curList(); if (!list) return;
+  const tmpl = getTmpl();
   const items = getItems();
-  if (items.find(i => i.shoppingListId === list.id && (i.nameSnapshot||'').toLowerCase() === t.name.toLowerCase())) {
-    toast('Already in list'); return;
-  }
-  items.push({ id: uid(), shoppingListId: list.id, templateItemId: t.id,
-    nameSnapshot: t.name, categorySnapshot: t.category, noteSnapshot: t.note,
-    quantity: _checkQty, isChecked: false });
+  let added = 0;
+  _qaSelected.forEach((qty, tid) => {
+    const t = tmpl.find(x => x.id === tid); if (!t) return;
+    if (items.find(i => i.shoppingListId === list.id && (i.nameSnapshot||'').toLowerCase() === t.name.toLowerCase())) return;
+    items.push({ id: uid(), shoppingListId: list.id, templateItemId: t.id,
+      nameSnapshot: t.name, categorySnapshot: t.category, noteSnapshot: t.note,
+      quantity: qty, isChecked: false });
+    added++;
+  });
+  if (!added) { toast('Already in list'); return; }
   setItems(items);
-  _checkQty = 1;
-  toast(`Added: ${t.name}`);
+  _qaSelected.clear();
+  toast(`Added ${added} item${added > 1 ? 's' : ''} to list`);
   renderCheck();
 }
 
@@ -1556,6 +1645,23 @@ function onTmplQ(v) {
   if (inp) { inp.focus(); inp.setSelectionRange(v.length, v.length); }
 }
 
+function suggestCategory(name) {
+  if (!name) return CATEGORIES[0];
+  const lc = name.toLowerCase();
+  const tmpl = getTmpl();
+  const exact = tmpl.find(t => t.name.toLowerCase() === lc);
+  if (exact && exact.category) return exact.category;
+  let best = null, bestScore = 0;
+  tmpl.forEach(t => {
+    if (!t.category) return;
+    const tn = t.name.toLowerCase();
+    let score = (tn.includes(lc) || lc.includes(tn)) ? 5 : 0;
+    if (!score) lc.split(/\s+/).filter(w => w.length > 2).forEach(w => { if (tn.includes(w)) score++; });
+    if (score > bestScore) { bestScore = score; best = t; }
+  });
+  return (best && bestScore > 0) ? best.category : CATEGORIES[0];
+}
+
 function openTmplForm(tid, prefill) {
   _editTid = tid;
   const isEdit = !!tid;
@@ -1574,7 +1680,7 @@ function openTmplForm(tid, prefill) {
     document.getElementById('tf-note').value = t.note || '';
   } else {
     document.getElementById('tf-name').value = prefill || '';
-    sel.value = CATEGORIES[0];
+    sel.value = prefill ? suggestCategory(prefill) : CATEGORIES[0];
     document.getElementById('tf-note').value = '';
   }
 
@@ -1624,6 +1730,7 @@ function deleteTmplItem() {
 // ══════════════════════════════════════════
 
 let _histDetail = null; // null = list view, string id = detail view
+let _histSelecting = false, _histSelected = new Set();
 
 function renderHist() {
   if (_histDetail) renderHistDetail(_histDetail);
@@ -1639,8 +1746,21 @@ function renderHistList() {
       <div>
         <h1>History</h1>
         <p>${history.length} completed shopping${history.length !== 1 ? 's' : ''}</p>
-      </div>
+      </div>`;
+
+  if (history.length) {
+    h += _histSelecting
+      ? `<button class="btn btn-secondary btn-sm" style="width:auto" onclick="histCancelSelect()">Cancel</button>`
+      : `<button class="btn btn-secondary btn-sm" style="width:auto" onclick="histEnterSelect()">Select</button>`;
+  }
+  h += `</div>`;
+
+  if (_histSelecting && _histSelected.size > 0) {
+    const n = _histSelected.size;
+    h += `<div style="padding:0 16px 12px">
+      <button class="btn btn-danger" onclick="histDeleteSelected()">Delete ${n} record${n > 1 ? 's' : ''}</button>
     </div>`;
+  }
 
   if (!history.length) {
     h += `<div class="empty"><div class="ei">🗂️</div><p>No completed shopping trips yet.<br>Finish your first shopping session<br>to see it here.</p></div>`;
@@ -1654,18 +1774,64 @@ function renderHistList() {
     const total     = entry.items.length;
     const date      = fmtDate(entry.completedAt);
     const amt       = entry.totalAmount ? `₪${entry.totalAmount.toLocaleString()}` : '';
-    h += `<div class="hist-entry" onclick="openHistDetail('${entry.id}')">
-      <div class="hist-icon">🧾</div>
-      <div class="hist-body">
-        <div class="hist-date">${date}</div>
-        <div class="hist-meta">${purchased} / ${total} items purchased</div>
-      </div>
-      ${amt ? `<div class="hist-amount">${amt}</div>` : '<div class="item-chevron">›</div>'}
-    </div>`;
+    const sel       = _histSelecting && _histSelected.has(entry.id);
+    const cls       = 'hist-entry' + (sel ? ' hist-sel' : '');
+
+    if (_histSelecting) {
+      h += `<div class="${cls}" onclick="histToggleSelect('${entry.id}')">
+        <div class="hist-cb${sel ? ' on' : ''}">${sel ? '✓' : ''}</div>
+        <div class="hist-body">
+          <div class="hist-date">${date}</div>
+          <div class="hist-meta">${purchased} / ${total} items purchased</div>
+        </div>
+        ${amt ? `<div class="hist-amount">${amt}</div>` : ''}
+      </div>`;
+    } else {
+      h += `<div class="${cls}" onclick="openHistDetail('${entry.id}')">
+        <div class="hist-icon">🧾</div>
+        <div class="hist-body">
+          <div class="hist-date">${date}</div>
+          <div class="hist-meta">${purchased} / ${total} items purchased</div>
+        </div>
+        ${amt ? `<div class="hist-amount">${amt}</div>` : '<div class="item-chevron">›</div>'}
+      </div>`;
+    }
   });
   h += '</div>';
 
   el.innerHTML = h;
+}
+
+function histEnterSelect() {
+  _histSelecting = true;
+  _histSelected.clear();
+  renderHistList();
+}
+
+function histCancelSelect() {
+  _histSelecting = false;
+  _histSelected.clear();
+  renderHistList();
+}
+
+function histToggleSelect(id) {
+  if (_histSelected.has(id)) _histSelected.delete(id);
+  else _histSelected.add(id);
+  renderHistList();
+}
+
+function histDeleteSelected() {
+  const n = _histSelected.size;
+  if (!n) return;
+  if (!confirm(`Delete ${n} shopping record${n > 1 ? 's' : ''}? This cannot be undone.`)) return;
+  const ids = [..._histSelected];
+  MEM.history = MEM.history.filter(h => !_histSelected.has(h.id));
+  sb.from('shopping_history').delete().in('id', ids)
+    .then(({ error }) => { if (error) console.error('deleteHistory:', error); });
+  _histSelecting = false;
+  _histSelected.clear();
+  toast(`Deleted ${ids.length} record${ids.length > 1 ? 's' : ''}`);
+  renderHistList();
 }
 
 function openHistDetail(id) {
