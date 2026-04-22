@@ -1351,11 +1351,11 @@ function confirmFinish() {
   }
 }
 
-function doFinish(carry) {
+async function doFinish(carry) {
   const al = activeList(); if (!al) return;
   const remaining = carry ? listItems(al.id).filter(i => !i.isChecked) : [];
   closeModal('m-carry');
-  completeList(al, _pendingAmt, remaining);
+  await completeList(al, _pendingAmt, remaining);
 }
 
 async function completeList(list, amount, remaining) {
@@ -1386,16 +1386,19 @@ async function completeList(list, amount, remaining) {
   await setLists(lists);
 
   if (remaining.length) {
-    const items = getItems();
-    remaining.forEach(r => {
-      items.push({ id: uid(), shoppingListId: newDraft.id,
-        templateItemId: r.templateItemId,
-        nameSnapshot: r.nameSnapshot,
-        categorySnapshot: r.categorySnapshot,
-        noteSnapshot: [r.noteSnapshot, 'from previous'].filter(Boolean).join(' · '),
-        quantity: r.quantity, isChecked: false });
-    });
-    setItems(items); // safe: newDraft row is now committed in shopping_lists
+    const newItems = remaining.map(r => ({
+      id: uid(), shoppingListId: newDraft.id,
+      templateItemId: r.templateItemId ?? null,
+      nameSnapshot: r.nameSnapshot,
+      categorySnapshot: r.categorySnapshot,
+      noteSnapshot: [r.noteSnapshot, 'From previous shopping'].filter(Boolean).join(' · '),
+      quantity: r.quantity, isChecked: false,
+    }));
+    // Update MEM first so rerender shows items immediately
+    MEM.items = [...MEM.items, ...newItems];
+    // Await the DB write — newDraft row is committed above so FK is satisfied
+    const { error } = await sb.from('shopping_list_items').insert(newItems.map(toDb.item));
+    if (error) console.error('carry-over items insert:', error);
   }
 
   toast('Shopping completed! 🎉');
