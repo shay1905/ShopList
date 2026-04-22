@@ -521,18 +521,6 @@
   </div>
 </div>
 
-<!-- Modal: Carry over remaining -->
-<div class="overlay" id="m-carry">
-  <div class="modal">
-    <h2>Unchecked Items</h2>
-    <p id="m-carry-msg"></p>
-    <div class="modal-btns">
-      <button class="btn btn-primary"    onclick="doFinish(true)">Yes, carry them over</button>
-      <button class="btn btn-secondary"  onclick="doFinish(false)">No, start fresh</button>
-      <button class="btn btn-secondary"  onclick="closeModal('m-carry')">Cancel</button>
-    </div>
-  </div>
-</div>
 
 <!-- Modal: New item options -->
 <div class="overlay" id="m-newitem">
@@ -1133,11 +1121,6 @@ function wireAddInput() {
     if (!_addOpenOnce) { _addOpenOnce = true; }
     if (inp.value.trim()) showAC(inp.value.trim());
   });
-  document.addEventListener('click', function h(e) {
-    if (!e.target.closest('.ac-wrap') && !e.target.closest('.btn-icon')) hideAC();
-    document.removeEventListener('click', h);
-    document.addEventListener('click', h);
-  }, { once: false });
 }
 
 function onAddInput(val) {
@@ -1253,7 +1236,7 @@ function addToList(name, category, note, templateId, qty) {
     nameSnapshot: name, categorySnapshot: category||'', noteSnapshot: note||'',
     quantity: qty||1, isChecked: false });
   setItems(items);
-  rerender();
+  setTimeout(rerender, 0);
 }
 
 let _editId = null, _editQty = 1;
@@ -1338,8 +1321,7 @@ function openFinish() {
 
 function confirmFinish() {
   _pendingAmt = parseFloat(document.getElementById('finish-amt').value) || 0;
-  const al    = activeList(); if (!al) return;
-  const unchecked = listItems(al.id).filter(i => !i.isChecked);
+  const al = activeList(); if (!al) return;
   closeModal('m-finish');
   if (!unchecked.length) {
     completeList(al, _pendingAmt, []);
@@ -1351,17 +1333,16 @@ function confirmFinish() {
   }
 }
 
-async function doFinish(carry) {
+function doFinish(carry) {
   const al = activeList(); if (!al) return;
   const remaining = carry ? listItems(al.id).filter(i => !i.isChecked) : [];
   closeModal('m-carry');
-  await completeList(al, _pendingAmt, remaining);
+  completeList(al, _pendingAmt, remaining);
 }
 
 async function completeList(list, amount, remaining) {
   const completedAt = Date.now();
 
-  // Snapshot items into history archive before anything else changes
   const snapshot = listItems(list.id).map(i => ({
     nameSnapshot: i.nameSnapshot,
     categorySnapshot: i.categorySnapshot,
@@ -1377,28 +1358,20 @@ async function completeList(list, amount, remaining) {
   const target = lists.find(l => l.id === list.id);
   if (target) { target.status = 'completed'; target.totalAmount = amount; target.completedAt = completedAt; }
 
-  const newDraft = { id: uid(), status: 'draft', totalAmount: null, createdAt: Date.now() };
-  lists.push(newDraft);
-
-  // MEM is updated synchronously by setLists, so toast + rerender reflect
-  // the new state immediately. We still await the DB write before writing
-  // carried-over items — they have a FK on newDraft.id in shopping_lists.
+  lists.push({ id: uid(), status: 'draft', totalAmount: null, createdAt: Date.now() });
   await setLists(lists);
 
   if (remaining.length) {
-    const newItems = remaining.map(r => ({
-      id: uid(), shoppingListId: newDraft.id,
-      templateItemId: r.templateItemId ?? null,
-      nameSnapshot: r.nameSnapshot,
-      categorySnapshot: r.categorySnapshot,
-      noteSnapshot: [r.noteSnapshot, 'From previous shopping'].filter(Boolean).join(' · '),
-      quantity: r.quantity, isChecked: false,
-    }));
-    // Update MEM first so rerender shows items immediately
-    MEM.items = [...MEM.items, ...newItems];
-    // Await the DB write — newDraft row is committed above so FK is satisfied
-    const { error } = await sb.from('shopping_list_items').insert(newItems.map(toDb.item));
-    if (error) console.error('carry-over items insert:', error);
+    const items = getItems();
+    remaining.forEach(r => {
+      items.push({ id: uid(), shoppingListId: newDraft.id,
+        templateItemId: r.templateItemId,
+        nameSnapshot: r.nameSnapshot,
+        categorySnapshot: r.categorySnapshot,
+        noteSnapshot: [r.noteSnapshot, 'from previous'].filter(Boolean).join(' · '),
+        quantity: r.quantity, isChecked: false });
+    });
+    setItems(items); // safe: newDraft row is now committed in shopping_lists
   }
 
   toast('Shopping completed! 🎉');
@@ -1698,18 +1671,19 @@ function saveTmplForm() {
   if (!name) { alert('Please enter an item name.'); return; }
 
   const tmpl = getTmpl();
+  const savedTid = _editTid || uid();
   if (_editTid) {
     const t = tmpl.find(x => x.id === _editTid);
     if (t) { t.name = name; t.category = cat; t.note = note; }
   } else {
-    tmpl.push({ id: uid(), name, category: cat, note });
+    tmpl.push({ id: savedTid, name, category: cat, note });
   }
   setTmpl(tmpl);
   closeModal('m-tmpl-form');
 
   // If triggered from "add new item to list" flow
   if (_pendingNew) {
-    addToList(name, cat, note, null, _pendingNew.qty);
+    addToList(name, cat, note, savedTid, _pendingNew.qty);
     _pendingNew = null;
     resetAddInput();
     go('list');
@@ -1773,8 +1747,8 @@ function renderHistList() {
 
   h += '<div class="card">';
   history.forEach(entry => {
-    const purchased = entry.items.filter(i => i.isChecked).length;
-    const total     = entry.items.length;
+    const purchased = (entry.items || []).filter(i => i.isChecked).length;
+    const total     = (entry.items || []).length;
     const date      = fmtDate(entry.completedAt);
     const amt       = entry.totalAmount ? `₪${entry.totalAmount.toLocaleString()}` : '';
     const sel       = _histSelecting && _histSelected.has(entry.id);
@@ -1847,8 +1821,8 @@ function renderHistDetail(id) {
   const entry = getHistory().find(e => e.id === id);
   if (!entry) { _histDetail = null; renderHistList(); return; }
 
-  const purchased = entry.items.filter(i => i.isChecked);
-  const skipped   = entry.items.filter(i => !i.isChecked);
+  const purchased = (entry.items || []).filter(i => i.isChecked);
+  const skipped   = (entry.items || []).filter(i => !i.isChecked);
   const date      = fmtDate(entry.completedAt);
 
   let h = `
@@ -1943,6 +1917,10 @@ function toast(msg) {
 // ══════════════════════════════════════════
 //  BOOT
 // ══════════════════════════════════════════
+
+document.addEventListener('click', e => {
+  if (!e.target.closest('.ac-wrap') && !e.target.closest('.btn-icon')) hideAC();
+});
 
 (async () => {
   document.getElementById('s-list').innerHTML = '<div class="empty"><p>Loading…</p></div>';
