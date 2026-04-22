@@ -1323,14 +1323,7 @@ function confirmFinish() {
   _pendingAmt = parseFloat(document.getElementById('finish-amt').value) || 0;
   const al = activeList(); if (!al) return;
   closeModal('m-finish');
-  if (!unchecked.length) {
-    completeList(al, _pendingAmt, []);
-  } else {
-    const n = unchecked.length;
-    document.getElementById('m-carry-msg').textContent =
-      `${n} item${n!==1?'s':''} were not marked as purchased. Move them to a new draft list?`;
-    openModal('m-carry');
-  }
+  completeList(al, _pendingAmt, []);
 }
 
 function doFinish(carry) {
@@ -1358,7 +1351,8 @@ async function completeList(list, amount, remaining) {
   const target = lists.find(l => l.id === list.id);
   if (target) { target.status = 'completed'; target.totalAmount = amount; target.completedAt = completedAt; }
 
-  lists.push({ id: uid(), status: 'draft', totalAmount: null, createdAt: Date.now() });
+  const newDraft = { id: uid(), status: 'draft', totalAmount: null, createdAt: Date.now() };
+  lists.push(newDraft);
   await setLists(lists);
 
   if (remaining.length) {
