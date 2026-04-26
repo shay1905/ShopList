@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Carry-over Tests</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #f5f5f5; color: #222; font-size: 14px; }
+    h2 { margin: 24px 0 8px; font-size: 15px; color: #555; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+    .pass { color: #2a7a2a; }
+    .fail { color: #c0392b; font-weight: bold; }
+    pre { background: white; padding: 12px; border-radius: 6px; border: 1px solid #ddd; margin-top: 20px; font-size: 13px; }
+    .known { color: #8a6c00; }
+  </style>
+</head>
+<body>
+<h1 style="font-size:18px;margin-bottom:4px">Carry-over Logic — Unit Tests</h1>
+<p style="color:#777;margin-bottom:0;font-size:13px">Tests the filter + item-build logic extracted from <code>confirmFinish</code> and <code>completeList</code>.</p>
+<div id="out"></div>
+
+<script>
+'use strict';
+
+// ── Pure logic extracted from index.html ──
+// (mirrors the real implementation exactly)
+
+function getCarryOverItems(allItems, listId) {
+  return allItems.filter(i => i.shoppingListId === listId && !i.isChecked);
+}
+
+function buildCarryOverItem(r, newDraftId) {
+  return {
+    shoppingListId:   newDraftId,
+    templateItemId:   r.templateItemId ?? null,
+    nameSnapshot:     r.nameSnapshot,
+    categorySnapshot: r.categorySnapshot,
+    noteSnapshot:     (r.noteSnapshot || '').includes('from previous') ? r.noteSnapshot : [r.noteSnapshot, 'from previous'].filter(Boolean).join(' · '),
+    quantity:         r.quantity,
+    isChecked:        false,
+  };
+}
+
+function buildCarryOverItems(remaining, newDraftId) {
+  return remaining.map(r => buildCarryOverItem(r, newDraftId));
+}
+
+// ── Helpers ──
+
+function item(name, checked, opts = {}) {
+  return {
+    shoppingListId:   opts.listId   ?? 'L1',
+    templateItemId:   opts.tmplId   ?? null,
+    nameSnapshot:     name,
+    categorySnapshot: opts.cat      ?? 'Produce',
+    noteSnapshot:     opts.note     ?? '',
+    quantity:         opts.qty      ?? 1,
+    isChecked:        checked,
+  };
+}
+
+// ── Test runner ──
+
+let passed = 0, failed = 0;
+const out = document.getElementById('out');
+
+function section(title) {
+  const h = document.createElement('h2');
+  h.textContent = title;
+  out.appendChild(h);
+}
+
+function assert(label, condition, detail = '') {
+  const div = document.createElement('div');
+  if (condition) {
+    div.className = 'pass';
+    div.textContent = `✓ ${label}`;
+    passed++;
+  } else {
+    div.className = 'fail';
+    div.textContent = `✗ ${label}${detail ? ' — ' + detail : ''}`;
+    failed++;
+  }
+  out.appendChild(div);
+}
+
+function note(msg) {
+  const div = document.createElement('div');
+  div.className = 'known';
+  div.textContent = `⚠ known issue: ${msg}`;
+  out.appendChild(div);
+}
+
+// ════════════════════════════════════
+//  TESTS
+// ════════════════════════════════════
+
+section('1 · All items checked → empty draft');
+{
+  const items = [item('Milk', true), item('Eggs', true), item('Bread', true)];
+  const remaining = getCarryOverItems(items, 'L1');
+  assert('remaining is empty', remaining.length === 0);
+  assert('buildCarryOverItems returns []', buildCarryOverItems(remaining, 'D2').length === 0);
+}
+
+section('2 · No items checked → all carried over');
+{
+  const items = [item('Milk', false), item('Eggs', false), item('Bread', false)];
+  const remaining = getCarryOverItems(items, 'L1');
+  assert('all 3 items in remaining', remaining.length === 3);
+  const carried = buildCarryOverItems(remaining, 'D2');
+  assert('3 items built for new draft', carried.length === 3);
+  assert('all isChecked=false', carried.every(i => !i.isChecked));
+  assert('all point to new draft', carried.every(i => i.shoppingListId === 'D2'));
+}
+
+section('3 · Partially checked → only unchecked carried');
+{
+  const items = [
+    item('Milk',  true),
+    item('Bread', false),
+    item('Eggs',  false),
+  ];
+  const remaining = getCarryOverItems(items, 'L1');
+  assert('2 unchecked items in remaining', remaining.length === 2);
+  assert('Milk (checked) excluded', !remaining.find(i => i.nameSnapshot === 'Milk'));
+  assert('Bread (unchecked) included', !!remaining.find(i => i.nameSnapshot === 'Bread'));
+  assert('Eggs (unchecked) included',  !!remaining.find(i => i.nameSnapshot === 'Eggs'));
+}
+
+section('4 · Note handling');
+{
+  const withNote    = item('Salmon', false, { note: '2 KG' });
+  const withoutNote = item('Butter', false, { note: '' });
+  const carried = buildCarryOverItems([withNote, withoutNote], 'D2');
+
+  const salmon = carried.find(i => i.nameSnapshot === 'Salmon');
+  const butter = carried.find(i => i.nameSnapshot === 'Butter');
+
+  assert('existing note gets "from previous" appended', salmon.noteSnapshot === '2 KG · from previous');
+  assert('empty note becomes "from previous"',          butter.noteSnapshot === 'from previous');
+}
+
+section('5 · Multiple cycles — note does NOT accumulate (fixed)');
+{
+  // Cycle 1: item with no note
+  const original = item('Chips', false, { note: '' });
+  const [after1] = buildCarryOverItems([original], 'D2');
+  assert('cycle 1: note is "from previous"', after1.noteSnapshot === 'from previous');
+
+  // Cycle 2: same item still unchecked — note must NOT grow
+  const again = { ...after1, shoppingListId: 'D2', isChecked: false };
+  const [after2] = buildCarryOverItems([again], 'D3');
+  assert('cycle 2: note stays "from previous" (no duplicate)', after2.noteSnapshot === 'from previous');
+
+  // Cycle 1 with existing note
+  const withNote = item('Salmon', false, { note: '2 KG' });
+  const [carried] = buildCarryOverItems([withNote], 'D2');
+  assert('cycle 1 with note: "2 KG · from previous"', carried.noteSnapshot === '2 KG · from previous');
+
+  // Cycle 2 with existing note — must NOT grow
+  const again2 = { ...carried, shoppingListId: 'D2', isChecked: false };
+  const [carried2] = buildCarryOverItems([again2], 'D3');
+  assert('cycle 2 with note: stays "2 KG · from previous"', carried2.noteSnapshot === '2 KG · from previous');
+}
+
+section('6 · Items from other lists NOT included');
+{
+  const items = [
+    item('Milk',  false, { listId: 'L1' }),
+    item('Bread', false, { listId: 'L2' }), // different list
+  ];
+  const remaining = getCarryOverItems(items, 'L1');
+  assert('only 1 item (from L1)', remaining.length === 1);
+  assert('correct item carried', remaining[0].nameSnapshot === 'Milk');
+}
+
+section('7 · Quantity preserved');
+{
+  const items = [item('Eggs', false, { qty: 6 })];
+  const carried = buildCarryOverItems(getCarryOverItems(items, 'L1'), 'D2');
+  assert('quantity=6 preserved', carried[0].quantity === 6);
+}
+
+section('8 · templateItemId preserved');
+{
+  const items = [item('Milk', false, { tmplId: 'tmpl-abc' })];
+  const carried = buildCarryOverItems(getCarryOverItems(items, 'L1'), 'D2');
+  assert('templateItemId preserved', carried[0].templateItemId === 'tmpl-abc');
+}
+
+section('9 · category preserved');
+{
+  const items = [item('Salmon', false, { cat: 'Meat & Fish' })];
+  const carried = buildCarryOverItems(getCarryOverItems(items, 'L1'), 'D2');
+  assert('categorySnapshot preserved', carried[0].categorySnapshot === 'Meat & Fish');
+}
+
+// ── Summary ──
+
+const summary = document.createElement('pre');
+summary.textContent = `Results: ${passed} passed, ${failed} failed${failed ? '\n\nSome tests failed — check output above.' : ''}`;
+summary.style.background = failed ? '#fff0f0' : '#f0fff0';
+out.appendChild(summary);
+</script>
+</body>
+</html>

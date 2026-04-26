@@ -923,6 +923,21 @@ const listItems  = id  => getItems().filter(i => i.shoppingListId === id);
 
 async function init() {
   await loadFromSupabase();
+
+  // If Supabase has multiple draft lists from stale test runs, keep only the newest
+  // and delete the rest so draftList() always returns the correct one.
+  const allDrafts = getLists().filter(l => l.status === 'draft')
+                               .sort((a, b) => b.createdAt - a.createdAt);
+  if (allDrafts.length > 1) {
+    const staleIds = new Set(allDrafts.slice(1).map(d => d.id));
+    MEM.lists = MEM.lists.filter(l => !staleIds.has(l.id));
+    MEM.items = MEM.items.filter(i => !staleIds.has(i.shoppingListId));
+    const staleArr = [...staleIds];
+    sb.from('shopping_list_items').delete().in('list_id', staleArr)
+      .then(() => sb.from('shopping_lists').delete().in('id', staleArr))
+      .catch(e => console.error('draft dedup:', e));
+  }
+
   if (!MEM.tmpl.length) {
     // First run: seed template and create initial draft list
     const tmpl = [];
@@ -1323,7 +1338,8 @@ function confirmFinish() {
   _pendingAmt = parseFloat(document.getElementById('finish-amt').value) || 0;
   const al = activeList(); if (!al) return;
   closeModal('m-finish');
-  completeList(al, _pendingAmt, []);
+  const remaining = listItems(al.id).filter(i => !i.isChecked);
+  completeList(al, _pendingAmt, remaining);
 }
 
 function doFinish(carry) {
@@ -1335,39 +1351,83 @@ function doFinish(carry) {
 
 async function completeList(list, amount, remaining) {
   const completedAt = Date.now();
+  const newDraftId  = uid();
 
+  // ── 1. Snapshot for history (read before any MEM changes) ──
   const snapshot = listItems(list.id).map(i => ({
-    nameSnapshot: i.nameSnapshot,
+    nameSnapshot:     i.nameSnapshot,
     categorySnapshot: i.categorySnapshot,
-    noteSnapshot: i.noteSnapshot,
-    quantity: i.quantity,
-    isChecked: i.isChecked,
+    noteSnapshot:     i.noteSnapshot,
+    quantity:         i.quantity,
+    isChecked:        i.isChecked,
   }));
+
+  // ── 2. Build carry-over items strictly from the unchecked active-list items.
+  //       `remaining` was computed as listItems(activeList.id).filter(!isChecked)
+  //       in confirmFinish — we copy fields directly, never touch templates/history.
+  const carryItems = remaining.map(r => ({
+    id:               uid(),
+    shoppingListId:   newDraftId,
+    templateItemId:   r.templateItemId ?? null,
+    nameSnapshot:     r.nameSnapshot,
+    categorySnapshot: r.categorySnapshot,
+    noteSnapshot:     (r.noteSnapshot || '').includes('from previous')
+                        ? r.noteSnapshot
+                        : [r.noteSnapshot, 'from previous'].filter(Boolean).join(' · '),
+    quantity:         r.quantity,
+    isChecked:        false,
+  }));
+
+  // ── 3. Build new lists: purge ALL existing drafts (stale data guard),
+  //       mark the completed list, push a single clean new draft.
+  const staleDraftIds = new Set(getLists().filter(l => l.status === 'draft').map(l => l.id));
+  const newLists = getLists().filter(l => !staleDraftIds.has(l.id));
+  const target   = newLists.find(l => l.id === list.id);
+  if (target) { target.status = 'completed'; target.totalAmount = amount; target.completedAt = completedAt; }
+  const newDraft = { id: newDraftId, status: 'draft', totalAmount: null, createdAt: Date.now() };
+  newLists.push(newDraft);
+
+  // ── 4. Build new items: strip items belonging to stale drafts, add carry-over only.
+  //       This guarantees the new draft starts with exactly the unchecked active items.
+  const newItems = getItems().filter(i => !staleDraftIds.has(i.shoppingListId));
+  carryItems.forEach(c => newItems.push(c));
+
+  // ── 5. Save history ──
   const history = getHistory();
   history.unshift({ id: uid(), listId: list.id, completedAt, totalAmount: amount, items: snapshot });
   setHistory(history);
 
-  const lists = getLists();
-  const target = lists.find(l => l.id === list.id);
-  if (target) { target.status = 'completed'; target.totalAmount = amount; target.completedAt = completedAt; }
+  // ── 6. Compute diffs BEFORE touching MEM ──
+  const [delLists, upsLists] = diffArrays(MEM.lists, newLists);
+  const [delItems, upsItems] = diffArrays(MEM.items, newItems);
 
-  const newDraft = { id: uid(), status: 'draft', totalAmount: null, createdAt: Date.now() };
-  lists.push(newDraft);
-  await setLists(lists);
+  // ── 7. Atomically commit both arrays to MEM — synchronous, no yield between ──
+  MEM.lists = newLists;
+  MEM.items = newItems;
 
-  if (remaining.length) {
-    const items = getItems();
-    remaining.forEach(r => {
-      items.push({ id: uid(), shoppingListId: newDraft.id,
-        templateItemId: r.templateItemId,
-        nameSnapshot: r.nameSnapshot,
-        categorySnapshot: r.categorySnapshot,
-        noteSnapshot: [r.noteSnapshot, 'from previous'].filter(Boolean).join(' · '),
-        quantity: r.quantity, isChecked: false });
-    });
-    setItems(items); // safe: newDraft row is now committed in shopping_lists
+  // ── 8. Persist to Supabase: lists first (FK parent), then items ──
+  try {
+    if (delLists.length) {
+      const { error } = await sb.from('shopping_lists').delete().in('id', delLists.map(x => x.id));
+      if (error) throw error;
+    }
+    if (upsLists.length) {
+      const { error } = await sb.from('shopping_lists').upsert(upsLists.map(toDb.list), { onConflict: 'id' });
+      if (error) throw error;
+    }
+    if (delItems.length) {
+      const { error } = await sb.from('shopping_list_items').delete().in('id', delItems.map(x => x.id));
+      if (error) throw error;
+    }
+    if (upsItems.length) {
+      const { error } = await sb.from('shopping_list_items').upsert(upsItems.map(toDb.item), { onConflict: 'id' });
+      if (error) throw error;
+    }
+  } catch (e) {
+    console.error('completeList — Supabase persist error:', e);
   }
 
+  // ── 9. Render once — MEM is fully consistent at this point ──
   toast('Shopping completed! 🎉');
   rerender();
 }
