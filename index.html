@@ -514,10 +514,21 @@
 <!-- Modal: Finish shopping -->
 <div class="overlay" id="m-finish">
   <div class="modal">
-    <h2>Finish Shopping 🧾</h2>
-    <p id="m-finish-msg">Enter the total amount you spent (optional).</p>
-    <input type="number" class="amount-input" id="finish-amt" placeholder="₪ 0" inputmode="decimal">
+    <h2>Finish Shopping</h2>
+    <p>Are you sure you want to finish this shopping?</p>
     <div class="modal-btns" id="m-finish-btns"></div>
+  </div>
+</div>
+
+<!-- Modal: Start shopping confirmation -->
+<div class="overlay" id="m-start">
+  <div class="modal">
+    <h2>Start Shopping</h2>
+    <p>Are you ready to start this shopping?</p>
+    <div class="modal-btns">
+      <button class="btn btn-primary" onclick="doStartShopping()">Start Shopping</button>
+      <button class="btn btn-secondary" onclick="closeModal('m-start')">Cancel</button>
+    </div>
   </div>
 </div>
 
@@ -1294,6 +1305,11 @@ function removeListItem() {
 // ══════════════════════════════════════════
 
 function startShopping() {
+  openModal('m-start');
+}
+
+function doStartShopping() {
+  closeModal('m-start');
   const lists = getLists();
   const d = lists.find(l => l.status === 'draft');
   if (d) { d.status = 'active'; setLists(lists); }
@@ -1321,35 +1337,35 @@ function markAll() {
 }
 
 // ── Finish flow ──────────────────────────
-let _pendingAmt = 0;
 
 function openFinish() {
-  document.getElementById('finish-amt').value = '';
-  document.getElementById('m-finish-msg').textContent = 'How much did you spend? (optional)';
+  const al = activeList();
+  if (al) {
+    const checked = listItems(al.id).filter(i => i.isChecked).length;
+    if (checked === 0) { toast('Check at least one item before finishing'); return; }
+  }
   const btns = document.getElementById('m-finish-btns');
   btns.innerHTML = `
-    <button class="btn btn-primary"   onclick="confirmFinish()">Complete Shopping</button>
+    <button class="btn btn-primary"   onclick="confirmFinish()">Finish</button>
     <button class="btn btn-secondary" onclick="closeModal('m-finish')">Cancel</button>`;
   openModal('m-finish');
-  setTimeout(() => document.getElementById('finish-amt')?.focus(), 300);
 }
 
 function confirmFinish() {
-  _pendingAmt = parseFloat(document.getElementById('finish-amt').value) || 0;
   const al = activeList(); if (!al) return;
   closeModal('m-finish');
   const remaining = listItems(al.id).filter(i => !i.isChecked);
-  completeList(al, _pendingAmt, remaining);
+  completeList(al, remaining);
 }
 
 function doFinish(carry) {
   const al = activeList(); if (!al) return;
   const remaining = carry ? listItems(al.id).filter(i => !i.isChecked) : [];
   closeModal('m-carry');
-  completeList(al, _pendingAmt, remaining);
+  completeList(al, remaining);
 }
 
-async function completeList(list, amount, remaining) {
+async function completeList(list, remaining) {
   const completedAt = Date.now();
   const newDraftId  = uid();
 
@@ -1383,7 +1399,7 @@ async function completeList(list, amount, remaining) {
   const staleDraftIds = new Set(getLists().filter(l => l.status === 'draft').map(l => l.id));
   const newLists = getLists().filter(l => !staleDraftIds.has(l.id));
   const target   = newLists.find(l => l.id === list.id);
-  if (target) { target.status = 'completed'; target.totalAmount = amount; target.completedAt = completedAt; }
+  if (target) { target.status = 'completed'; target.totalAmount = null; target.completedAt = completedAt; }
   const newDraft = { id: newDraftId, status: 'draft', totalAmount: null, createdAt: Date.now() };
   newLists.push(newDraft);
 
@@ -1394,7 +1410,7 @@ async function completeList(list, amount, remaining) {
 
   // ── 5. Save history ──
   const history = getHistory();
-  history.unshift({ id: uid(), listId: list.id, completedAt, totalAmount: amount, items: snapshot });
+  history.unshift({ id: uid(), listId: list.id, completedAt, totalAmount: null, items: snapshot });
   setHistory(history);
 
   // ── 6. Compute diffs BEFORE touching MEM ──
