@@ -3,7 +3,19 @@
     "allow": [
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(magick --version)",
+      "Bash(convert --version)",
+      "Bash(node -e \"require\\('sharp'\\); console.log\\('sharp ok'\\)\")",
+      "Bash(python -c \"from PIL import Image; print\\('pillow ok'\\)\")",
+      "Bash(python3 -c \"from PIL import Image; print\\('pillow ok'\\)\")",
+      "Bash(mkdir -p C:/Shay/ShopList/public)",
+      "Bash(python -)",
+      "Bash(file C:/Shay/ShopList/images/*)",
+      "Bash(python3 *)",
+      "Bash(python *)",
+      "Read(//mnt/c/Shay/**)",
+      "Read(//c/Users/shaya/**)"
     ]
   }
 }

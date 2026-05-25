@@ -1598,7 +1598,8 @@ function qaToggleSelect(tid) {
 
 function qaStepItemQty(tid, d) {
   if (!_qaSelected.has(tid)) return;
-  const newQty = Math.max(1, _qaSelected.get(tid) + d);
+  if (d === -1 && _qaSelected.get(tid) === 1) { qaToggleSelect(tid); return; }
+  const newQty = _qaSelected.get(tid) + d;
   _qaSelected.set(tid, newQty);
   const el = document.getElementById(`qi-${tid}`);
   if (el) el.textContent = newQty;
